@@ -1,98 +1,63 @@
+# SPDX-FileCopyrightText: 2023 Mark Liffiton <liffiton@gmail.com>
+#
+# SPDX-License-Identifier: AGPL-3.0-only
+
+import asyncio
 import datetime as dt
-import json
 from collections.abc import Callable
-from dataclasses import Field, asdict
-from sqlite3 import Row
-from typing import Any, ClassVar, TypeVar
 
 from flask import (
     Blueprint,
-    abort,
+    current_app,
     flash,
-    g,
-    redirect,
     render_template,
     request,
-    url_for,
 )
-from typing_extensions import Protocol, Self
-from werkzeug.datastructures import ImmutableMultiDict
 from werkzeug.wrappers.response import Response
 
-from .auth import get_auth, instructor_required
+from .auth import get_auth_class, instructor_required
 from .db import get_db
-from .openai import get_models
+from .llm import LLM, get_models, with_llm
+from .redir import safe_redirect
 from .tz import date_is_past
 
-bp = Blueprint('class_config', __name__, url_prefix="/instructor/config", template_folder='templates')
+bp = Blueprint('class_config', __name__, template_folder='templates')
 
-
-# This module handles common class configuration (access control, LLM
-# selection) and also provides a generic interface to manage
-# application-specific class configuration.
-#
-# App-specific class configuration data are stored in dataclasses.  The
-# dataclass must define the config's fields and their types, as well as
-# implement a `from_request_form()` class method that generates a config object
-# based on inputs in request.form.
-#
-# Any application can register a dataclass with this module using
-# `register_class_config()`.  The application itself must provide a template
-# for a configuration set/update form named class_config_form.html for the
-# instructor class config page.  This module handles that form's submission (in
-# `set()`).  The application itself must implement any other logic for using
-# the configuration throughout the app.
-
-# For type checking classes for storing a class configuration:
-class IsClassConfig(Protocol):
-    # So it looks like a dataclass:
-    __dataclass_fields__: ClassVar[dict[str, Field[Any]]]
-    # So it can be generated from a request form:
-    @classmethod
-    def from_request_form(cls, form: ImmutableMultiDict[str, str]) -> Self:
-        pass
-
-# Store a registered config class.
-_class_config_class: type[IsClassConfig] | None = None
-
-def register_class_config(cls: type[IsClassConfig]) -> type[IsClassConfig]:
-    """ Register a class configuration dataclass with this module.
-    Used by each specific application that needs app-specific class configuration.
-    May be used as a decorator (returns the given class unmodified).
-    """
-    global _class_config_class  # noqa: PLW0603 (global statement)
-    _class_config_class = cls
-    return cls
+@bp.before_request
+@instructor_required
+def before_request() -> None:
+    """ Apply decorator to protect all class_config blueprint endpoints. """
 
 
 # Applications can also register additional forms/UI for including in the class
-# configuration page.  Each should must be provided as a request-handler
-# function that renders *only* its portion of the configuration screen's UI.
-_extra_config_handlers: list[Callable[[], str]] = []
+# configuration page.  Each must be provided as a function that renders *only*
+# its portion of the configuration screen's UI.  The application is responsible
+# for registering a blueprint with request handlers for any routes needed by
+# that UI.
+# This module global stores the render functions.
+_extra_config_renderfuncs: list[Callable[[], str]] = []
 
-def register_extra_handler(func: Callable[[], str]) -> Callable[[], str]:
-    """ Register a request handler that renders a portion of the class
-    configuration UI.
-    May be used as a decorator (returns the given function unmodified).
-    """
-    _extra_config_handlers.append(func)
-    return func
+def register_extra_section(render_func: Callable[[], str]) -> None:
+    """ Register a new section for the class configuration UI.  (See above.)"""
+    _extra_config_renderfuncs.append(render_func)
 
 
-def get_common_class_settings() -> tuple[Row, str | None]:
+@bp.route("/")
+def config_form() -> str:
     db = get_db()
-    auth = get_auth()
 
-    class_id = auth['class_id']
+    cur_class = get_auth_class()
+    class_id = cur_class.class_id
 
     class_row = db.execute("""
-        SELECT classes.id, classes.enabled, classes_user.link_ident, classes_user.link_reg_expires, classes_user.openai_key, classes_user.model_id
+        SELECT classes.id, classes.enabled, classes_user.link_ident, classes_user.link_reg_expires, classes_user.link_anon_login, classes_user.llm_api_key, classes_user.model_id
         FROM classes
         LEFT JOIN classes_user
           ON classes.id = classes_user.class_id
         WHERE classes.id=?
     """, [class_id]).fetchone()
 
+    # TODO: refactor into function for checking start/end dates
     expiration_date = class_row['link_reg_expires']
     if expiration_date is None:
         link_reg_state = None  # not a user-created class
@@ -103,56 +68,61 @@ def get_common_class_settings() -> tuple[Row, str | None]:
     else:
         link_reg_state = "date"
 
-    return class_row, link_reg_state
+    extra_sections = [render() for render in _extra_config_renderfuncs]  # rendered HTML for any extra config sections
+
+    return render_template("instructor_class_config.html", class_row=class_row, link_reg_state=link_reg_state, models=get_models(), extra_sections=extra_sections)
 
 
-T = TypeVar('T', bound='IsClassConfig')
-
-def get_class_config(config_class: type[T]) -> T:
-    if 'class_config' not in g:
-        auth = get_auth()
-        class_id = auth['class_id']
-
-        if class_id is None:
-            g.class_config = config_class()
-        else:
-            db = get_db()
-            config_row = db.execute("SELECT config FROM classes WHERE id=?", [class_id]).fetchone()
-            class_config_dict = json.loads(config_row['config'])
-            g.class_config = config_class(**class_config_dict)
-
-    return g.class_config
-
-
-@bp.route("/")
-@instructor_required
-def config_form() -> str:
-    class_config = get_class_config(_class_config_class) if _class_config_class is not None else None
-
-    class_row, link_reg_state = get_common_class_settings()
-
-    extra = [handler() for handler in _extra_config_handlers]  # rendered HTML for any extra config sections
-
-    return render_template("instructor_class_config.html", class_row=class_row, link_reg_state=link_reg_state, models=get_models(), class_config=class_config, extra=extra)
-
-
-@bp.route("/set", methods=["POST"])
-@instructor_required
-def set_config() -> Response:
-    if _class_config_class is None:
-        return abort(404)
-
+@bp.route("/save", methods=["POST"])
+def save_config() -> Response:
     db = get_db()
-    auth = get_auth()
 
     # only trust class_id from auth, not from user
-    class_id = auth['class_id']
+    cur_class = get_auth_class()
+    class_id = cur_class.class_id
 
-    class_config = _class_config_class.from_request_form(request.form)
-    class_config_json = json.dumps(asdict(class_config))
+    if 'clear_llm_api_key' in request.form:
+        db.execute("UPDATE classes_user SET llm_api_key='' WHERE class_id=?", [class_id])
+        db.commit()
+        flash("Class API key cleared.", "success")
 
-    db.execute("UPDATE classes SET config=? WHERE id=?", [class_config_json, class_id])
-    db.commit()
+    elif 'save_access_form' in request.form:
+        if 'is_user_class' in request.form:
+            # only present for user classes, not LTI
+            link_reg_active = request.form['link_reg_active']
+            if link_reg_active == "disabled":
+                new_date = str(dt.date.min)
+            elif link_reg_active == "enabled":
+                new_date = str(dt.date.max)
+            else:
+                new_date = request.form['link_reg_expires']
 
-    flash("Configuration set!", "success")
-    return redirect(url_for(".config_form"))
+            class_link_anon_login = 1 if 'class_link_anon_login' in request.form else 0
+            db.execute("UPDATE classes_user SET link_reg_expires=?, link_anon_login=? WHERE class_id=?", [new_date, class_link_anon_login, class_id])
+
+        class_enabled = 1 if 'class_enabled' in request.form else 0
+        db.execute("UPDATE classes SET enabled=? WHERE id=?", [class_enabled, class_id])
+        db.commit()
+        flash("Class access configuration updated.", "success")
+
+    elif 'save_llm_form' in request.form:
+        if 'llm_api_key' in request.form:
+            db.execute("UPDATE classes_user SET llm_api_key=? WHERE class_id=?", [request.form['llm_api_key'], class_id])
+        db.execute("UPDATE classes_user SET model_id=? WHERE class_id=?", [request.form['model_id'], class_id])
+        db.commit()
+        flash("Class language model configuration updated.", "success")
+
+    return safe_redirect(request.referrer, default_endpoint="profile.main")
+
+
+@bp.route("/test_llm")
+@with_llm()
+def test_llm(llm: LLM) -> str:
+    response, response_txt = asyncio.run(llm.get_completion(prompt="Please write 'OK'"))
+
+    if 'error' in response:
+        return f"<b>Error:</b><br>{response_txt}"
+    else:
+        if response_txt != "OK":
+            current_app.logger.error(f"LLM check had no error but responded not 'OK'?  Response: {response_txt}")
+        return "ok"

@@ -13,44 +13,34 @@ SPDX-License-Identifier: AGPL-3.0-only
   max-width: 1600px;
   margin: auto;
 }
-.conf_cols {
-  display: flex;
-  justify-content: center;
-  gap: 1em;
-}
+.item_sep { border: 2px solid #ccc; margin: 1em; }
+.flex_items { display: flex; gap: 2em; flex-wrap: wrap; }
+.flex_item { flex: 1 0 10em; }
 @media (max-width: 1200px) {
   /* flip to column below a given width (instead of just using flex-wrap) so any .sep item becomes a horizontal line */
-  .conf_cols { flex-direction: column; }
+  .flex_items { flex-direction: column; }
 }
-.conf_col_sep {
-  /* draw a line between config sections */
-  border: 2px solid #ccc;
-}
-.conf_col .field-body {
+.field-body {
   /* override bulma sizing for these forms */
   flex-grow: 2;
 }
-.conf_col input[type='checkbox'],
-.conf_col input[type='radio'] {
+input[type='checkbox'],
+input[type='radio'] {
   transform: scale(2.0);
   margin: 0.5rem;
   margin-top: 0.8rem;
 }
-.conf_col table input[type='radio'] {
-  transform: scale(1.5);
-  margin: 0;
-}
 </style>
 <section class="section">
-  <h1 class="title">{{ auth['class_name'] }} Configuration</h1>
-  <div class="conf_cols">
-    <div class="conf_col">
+  <h1 class="title">Configure Class: {{ auth.cur_class.class_name }}</h1>
+  <div class="flex_items" style="gap: 0;">
+    <div class="flex_item">
       <h2 class="title is-size-4">Access</h2>
-      <form action="{{ url_for("instructor.set_user_class_setting") }}" method="post">
+      <form action="{{ url_for("class_config.save_config") }}" method="post">
         <div class="field is-horizontal">
           <div class="field-label is-normal">
             <label class="label" for="class_enabled">Class Active:</label>
-            <p class="has-text-grey">When not active, a class is "archived": users can still see old queries, but no new queries can be made.</p>
+            <p class="help-text">When not active, a class is "archived": users can still see old queries, but no new queries can be made.</p>
           </div>
           <div class="field-body">
             <div class="field">
@@ -63,6 +53,7 @@ SPDX-License-Identifier: AGPL-3.0-only
 
         {% if class_row['link_ident'] %}
         {# link_ident only in classes_user, so will only be set for user classes. #}
+        <input type="hidden" name="is_user_class" value="true">
 
         <div class="field is-horizontal">
           <div class="field-label">
@@ -78,13 +69,12 @@ SPDX-License-Identifier: AGPL-3.0-only
         <div class="field is-horizontal">
           <div class="field-label is-normal">
             <label class="label">Registration via Link:</label>
-            <p class="has-text-grey">When enabled, any users who access the class link will be registered automatically.</p>
-            <p class="has-text-grey">When disabled, only already-registered users can access the class via its link.</p>
+            <p class="help-text">When enabled, any users who access the class link will be registered automatically.</p>
+            <p class="help-text">When disabled, only already-registered users can access the class via its link.</p>
           </div>
           <div class="field-body">
             <div class="field" x-data="{ link_reg_active: '{{ link_reg_state }}' }">
               <div class="control">
-                <input type="hidden" name="link_reg_active_present" value="true">
                 <label class="radio">
                   <input name="link_reg_active" x-model="link_reg_active" id="link_reg_disabled" type="radio" value="disabled" {% if link_reg_state == "disabled" %}checked{% endif %}>
                   Disabled
@@ -95,7 +85,7 @@ SPDX-License-Identifier: AGPL-3.0-only
                   <input name="link_reg_active" x-model="link_reg_active" id="link_reg_expires" type="radio" value="date" {% if link_reg_state == "date" %}checked{% endif %}>
                   Only until:
                 </label>
-                <input class="input" name="link_reg_expires" required x-bind:disabled="link_reg_active !== 'date'" type="date" style="width: inherit; vertical-align: baseline;" value="{{ class_row.link_reg_expires if link_reg_state == "date" else "" }}">
+                <input required class="input" name="link_reg_expires" x-bind:disabled="link_reg_active !== 'date'" type="date" style="width: inherit; vertical-align: baseline;" value="{{ class_row.link_reg_expires if link_reg_state == "date" else "" }}">
                 <em class="has-text-grey">anywhere on Earth</em>
               </div>
               <div class="control">
@@ -107,6 +97,22 @@ SPDX-License-Identifier: AGPL-3.0-only
             </div>
           </div>
         </div>
+
+        <div class="field is-horizontal">
+          <div class="field-label is-normal">
+            <label class="label" for="class_link_anon_login">Anonymous Registration:</label>
+            <p class="help-text">When this is enabled, anyone using the access link who does not already have an account will create an anonymous account.</p>
+            <p class="help-text">If they already have an account, they will join the class with that account regardless.</p>
+          </div>
+          <div class="field-body">
+            <div class="field">
+              <div class="control">
+                <input name="class_link_anon_login" id="class_link_anon_login" type="checkbox" {% if class_row['link_anon_login'] %}checked{% endif %}>
+              </div>
+            </div>
+          </div>
+        </div>
+
         {% endif %}{# end if class['link_ident'] -- i.e., end of user-created class config #}
 
         <div class="field is-horizontal">
@@ -124,26 +130,47 @@ SPDX-License-Identifier: AGPL-3.0-only
 
       {% if class_row['link_ident'] %}
       {# link_ident only in classes_user, so will only be set for user classes. #}
-      <div class="conf_col_sep mt-5"></div>
+      <div class="item_sep"></div>
 
       <h2 class="title is-size-4 mt-5">Language Model</h2>
-      <form action="{{ url_for("instructor.set_user_class_setting") }}" method="post">
+      <form action="{{ url_for("class_config.save_config") }}" method="post" x-data="{
+          llm_config_saved: {{ 'true' if class_row.llm_api_key else 'false' }},
+          llm_test_loading: false,
+          llm_test_result: null,
+          dialog: document.querySelector('#llm_test_dialog'),
+          showDialog() {
+            this.dialog.showModal();
+          },
+          test_llm() {
+            this.llm_test_loading = true;
+            fetch('{{url_for('class_config.test_llm')}}')
+              .then(response => response.text())
+              .then(text => {
+                this.llm_test_loading = false;
+                this.llm_test_result = text;
+                if (text !== 'ok') {
+                  this.showDialog();
+                }
+              })
+          },
+      }">
         <div class="field is-horizontal">
           <div class="field-label is-normal">
             <label class="label">OpenAI API Key:</label>
-            <p class="has-text-grey">If blank, users in this class will not be able to submit queries.</p>
+            <p class="help-text">Your key must be in a <a href="https://platform.openai.com/docs/guides/rate-limits/usage-tiers">usage tier</a> that allows for the level of usage you expect.  The free tier does not support the models used here.</p>
+            <p class="help-text">If blank, users in this class will not be able to submit queries.</p>
           </div>
           <div class="field-body">
-            {% if class_row.openai_key %}
+            {% if class_row.llm_api_key %}
               <div style="margin-top: 0.375rem;" x-data="{show_confirm: false}">
-                {{ "*" * 20 + class_row.openai_key[-4:] }}
-                <button class="button is-danger is-small ml-3" type="button" @click="show_confirm=true" x-bind:disabled="show_confirm"><span class="delete mr-2"></span> Clear OpenAI Key</button>
-                <button class="button is-danger is-small" type="submit" name="clear_openai_key" x-show="show_confirm"><b>Confirm</b>&nbsp;clear OpenAI Key</button>
+                {{ "*" * 20 + class_row.llm_api_key[-4:] }}
+                <button class="button is-danger is-small ml-3" type="button" @click="show_confirm=true" x-bind:disabled="show_confirm"><span class="delete mr-2"></span> Clear API Key</button>
+                <button class="button is-danger is-small" type="submit" name="clear_llm_api_key" x-show="show_confirm"><b>Confirm</b>&nbsp;clear API Key</button>
               </div>
             {% else %}
               <div class="field">
                 <div class="control">
-                  <input class="input" name="openai_key">
+                  <input class="input" name="llm_api_key">
                 </div>
               </div>
             {% endif %}
@@ -152,14 +179,13 @@ SPDX-License-Identifier: AGPL-3.0-only
 
         <div class="field is-horizontal">
           <div class="field-label is-normal">
-            <label class="label">Model:</label>
-            <p class="has-text-grey">Note that GPT-4 is far more expensive (roughly 20 times the cost of GPT-3.5).</p>
+            <label class="label" for="model_id">Model:</label>
           </div>
           <div class="field-body">
             <div class="field">
               <div class="control">
                 <div class="select">
-                  <select name="model_id" required id="model_id">
+                  <select required name="model_id" id="model_id" x-on:change="llm_config_saved=false">
                     <option value="">Please select one</option>
                     {% for model in models %}
                       <option value="{{model.id}}" {% if model.id == class_row.model_id %}selected{% endif %}>{{model.name}}</option>
@@ -182,25 +208,80 @@ SPDX-License-Identifier: AGPL-3.0-only
           </div>
         </div>
 
+        <div class="field is-horizontal">
+          <div class="field-label is-normal"><!-- spacing --></div>
+          <div class="field-body">
+            <div class="field">
+              <div class="control buttons">
+                <button class="button" type="button" x-bind:disabled="!llm_config_saved || llm_test_result" x-on:click="test_llm()">Test saved key &amp; model</button>
+                <button class="button" type="button"
+                  x-bind:class="llm_test_loading ? 'is-loading' : llm_test_result==='ok' ? 'is-success' : 'is-danger'"
+                  x-show="llm_test_loading || llm_test_result"
+                  x-text="llm_test_loading ? '' : llm_test_result === 'ok' ? 'Success!' : 'Error!'"
+                  x-on:click="showDialog"></button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <dialog id="llm_test_dialog">
+          <div class="notification"
+               x-bind:class="llm_test_result === 'ok' ? 'is-success' : 'is-danger'"
+               x-html="llm_test_result === 'ok' ? 'Your API key and chosen model worked!' : llm_test_result">
+          </div>
+        </dialog>
+
       </form>
 
       {% endif %}{# end if class['link_ident'] -- i.e., end of user-created class config #}
 
     </div>
 
-    <div class="conf_col_sep">
-    </div>
-
-    <div class="conf_col">
-      {% include "class_config_form.html" ignore missing %}{# include an app-specific class_config_form.html *if* it exists #}
-
-      {% for extra_section in extra %}
-        <div class="conf_col_sep mt-5"></div>
-        {{ extra_section | safe }}  {# safe because it came from another render_template() call #}
+    {% if extra_sections %}
+    <div class="item_sep"></div>
+    <div class="flex_item">
+      {% for extra_section in extra_sections %}
+        {{ extra_section }}
+        {% if not loop.last %}
+          <div class="item_sep"></div>
+        {% endif %}
       {% endfor %}
     </div>
-  </div>
+    {% endif %}
 
+    <div class="item_sep" style="min-width: 90%;"></div>
+
+    <div class="box" style="max-width: 50em; margin: auto; border: 2px solid #f009; background: #ff000008">
+      <h2 class="title is-4 has-text-danger">Delete Class Data</h2>
+      <div class="content">
+        <p>This will:
+          <ul>
+            <li>Delete all user inputs made in this class</li>
+            <li>Remove all users from the class, including you</li>
+            <li>Delete class configuration data</li>
+            <li>Anonymize all class usage data</li>
+          </ul>
+        </p>
+        <p>Users will <em>not</em> be deleted, nor will their data in any other class they are enrolled in.</p>
+        {% if auth.user.auth_provider == 'lti' %}
+          <p>This class was accessed using a link from an LMS.  If that link still exists in the LMS after deleting the class data here, anyone following it will create a new, distinct instance of this class in CodeHelp (without any old data, but still with the ability to submit new queries).  To prevent that, remove the link from the LMS <em>before</em> deleting the class data here.</p>
+        {% endif %}
+        <p>Type "DELETE" in the text box to confirm you want to delete data for this class.</p>
+        <p class="has-text-danger"><strong class="has-text-danger">Warning:</strong> Deleting class data cannot be undone.</p>
+      </div>
+      <form method="POST" action="{{ url_for('instructor.delete_class') }}" class="field has-addons">
+        <input type="hidden" name="class_id", value="{{ auth.cur_class.class_id }}">
+        <div class="control">
+          <input class="input is-danger" type="text" name="confirm_delete" placeholder="Type DELETE to confirm">
+        </div>
+        <div class="control">
+          <button type="submit" class="button is-danger">
+            Delete Class Data
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
 </section>
 
-{% endblock %}
+{% endblock body %}

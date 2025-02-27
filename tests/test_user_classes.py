@@ -26,21 +26,21 @@ def _test_user_class_link(client, link_name, status, result):
         assert result in response.text
 
 
-@pytest.mark.parametrize('link_name,status,result', [
+@pytest.mark.parametrize(('link_name', 'status', 'result'), [
     ('invalid_link', 404, None),
     ('reg_disabled', 200, 'Registration is not active for this class.'),
     ('reg_expired', 200, 'Registration is not active for this class.'),
     ('reg_enabled', 302, '/'),
 ])
 def test_user_class_link(auth, client, link_name, status, result):
-    auth.login()
+    auth.login('testuser2', 'testuser2password')  # log in a testuser2, not connected to any existing classes
     _test_user_class_link(client, link_name, status, result)
 
 
 def _create_user_class(client, class_name):
     response = client.post(
         "/classes/create/",
-        data={'class_name': class_name, 'openai_key': "none"}
+        data={'class_name': class_name, 'llm_api_key': "none"}
     )
 
     assert response.status_code == 302
@@ -79,10 +79,10 @@ def test_user_class_usage(app):
 
     # 3) instructor enables/activates the course
     result = instructor_client.post(
-        '/instructor/user_class/set',
+        '/instructor/config/save',
         data={
             'class_enabled': 'on',
-            'link_reg_active_present': 'true',
+            'is_user_class': 'true',
             'link_reg_active': 'enabled',
             'save_access_form': '',
         },
@@ -99,20 +99,20 @@ def test_user_class_usage(app):
     assert result.status_code == 200
 
     # 5) instructor cannot yet see a query
-    result = instructor_client.get('/help/view/5')
-    assert result.status_code == 200
+    result = instructor_client.get('/help/view/101')
+    assert result.status_code == 400
     assert 'Invalid id.' in result.text
 
     # 6) user makes a query
-    result = user_client.post('/help/request', data={'lang_id': 1, 'code': 'student_1_code', 'error': 'error', 'issue': 'issue'})
+    result = user_client.post('/help/request', data={'code': 'student_1_code', 'error': 'error', 'issue': 'issue'})
     assert result.status_code == 302
-    assert result.location == "/help/view/5"  # next open query ID (test_data.sql inserts up to 4)
+    assert result.location == "/help/view/101"  # next open query ID (test_data.sql inserts max 100)
     result = user_client.get(result.location)
     assert result.status_code == 200
     assert 'student_1_code' in result.text
 
     # 7) instructor can see user's query
-    result = instructor_client.get('/help/view/5')
+    result = instructor_client.get('/help/view/101')
     assert result.status_code == 200
     assert 'student_1_code' in result.text
     assert 'Invalid id.' not in result.text
@@ -124,10 +124,10 @@ def test_user_class_usage(app):
 
     # 9) instructor disables link registration
     result = instructor_client.post(
-        '/instructor/user_class/set',
+        '/instructor/config/save',
         data={
             'class_enabled': 'on',
-            'link_reg_active_present': 'true',
+            'is_user_class': 'true',
             'link_reg_active': 'disabled',
             'save_access_form': '',
         },

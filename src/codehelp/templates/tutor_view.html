@@ -5,21 +5,29 @@ SPDX-License-Identifier: AGPL-3.0-only
 #}
 
 {% extends "base.html" %}
-{% from "tutor_chat_component.html" import chat_component %}
+{% from "chat_component.html" import chat_component %}
 {% from "recent_chats.html" import recent_chats %}
+
+{% block extrahead %}
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.19/dist/katex.min.css" integrity="sha384-7lU0muIg/i1plk7MgygDUp3/bNRA65orrBub4/OSWHECgwEsY83HaS1x3bljA/XV" crossorigin="anonymous">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.19/dist/katex.min.js" integrity="sha384-RdymN7NRJ+XoyeRY4185zXaxq9QWOOx3O7beyyrRK4KQZrPlCDQQpCu95FoCGPAE" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.19/dist/contrib/auto-render.min.js" integrity="sha384-hCXGrW6PitJEwbkoStFjeJxv+fSOOQKOPbJxSfM6G5sWZjAyWhXiTIIAmQqnlLlh" crossorigin="anonymous" onload="renderMathInElement(document.querySelector('#chat_view'));"></script>
+{% endblock extrahead %}
 
 {% block body %}
 <div class="columns is-desktop is-gapless">
 
   <div class="column is-three-quarters-desktop">
     <section class="section">
-      <div class="container content">
+      <div class="container content" id="chat_view">
         <h1 class="title">{{topic}}</h1>
 
-        <p><i>[showing context for debugging -- normally hidden]</i>  {{context}}</p>
+        {% if context_name %}
+          <p><b>Context:</b> {{ context_name }}</p>
+        {% endif %}
 
         {# debounce on the submit handler so that the form's actual submit fires *before* the form elements are disabled #}
-        <form action="{{url_for('tutor.new_message')}}" method="post" x-data="{loading: false}" x-on:submit.debounce.10ms="loading = true">
+        <form action="{{url_for('tutor.new_message')}}" method="post" x-data="{loading: false}" x-on:pageshow.window="loading = false" x-on:submit.debounce.10ms="loading = true">
           <input type="hidden" name="id" value="{{chat_id}}">
 
           {{ chat_component(chat, msg_input=True) }}
@@ -36,4 +44,4 @@ SPDX-License-Identifier: AGPL-3.0-only
 
 </div>
 
-{% endblock %}
+{% endblock body %}

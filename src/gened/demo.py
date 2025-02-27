@@ -15,20 +15,20 @@ from flask import (
 )
 from werkzeug.wrappers.response import Response
 
-from .admin import bp as bp_admin
-from .admin import register_admin_link
-from .auth import get_auth, set_session_auth_role, set_session_auth_user
+from . import admin
+from .auth import get_auth, set_session_auth_user
 from .db import get_db
+from .tables import Action, BoolCol, Col, DataTable, DateCol, NumCol
 from .tz import date_is_past
 
-bp = Blueprint('demo', __name__, url_prefix="/demo", template_folder='templates')
+bp = Blueprint('demo', __name__, template_folder='templates')
 
 
 @bp.route("/<string:demo_name>", methods=['GET'])
 def demo_register_user(demo_name: str) -> str | Response:
     # Can't create a demo user if already logged in.
     auth = get_auth()
-    if auth['user_id']:
+    if auth.user_id:
         flash("You are already logged in.", "warning")
         return render_template("error.html")
 
@@ -76,30 +76,44 @@ def demo_register_user(demo_name: str) -> str | Response:
 
 
 # ### Admin routes ###
+bp_admin = Blueprint('admin_demo', __name__, url_prefix='/demo_link', template_folder='templates')
 
-@register_admin_link("Demo Links")
-@bp_admin.route("/demo_link/")
+# Register the demo links admin component.
+admin.register_blueprint(bp_admin)
+admin.register_navbar_item("admin_demo.demo_link_view", "Demo Links")
+
+
+@bp_admin.route("/")
 def demo_link_view() -> str:
     db = get_db()
-    demo_links = db.execute("SELECT * FROM demo_links").fetchall()
+    demo_links = db.execute("SELECT id, name, expiration, tokens, enabled, uses FROM demo_links").fetchall()
 
-    return render_template("admin_demo_link.html", demo_links=demo_links)
+    table = DataTable(
+        name='demo_links',
+        columns=[NumCol('id'), Col('name'), DateCol('expiration'), NumCol('tokens'), BoolCol('enabled'), NumCol('uses')],
+        actions=[Action("Edit link", icon='pencil', url=url_for('.demo_link_form'), id_col=0)],
+        create_endpoint='.demo_link_new',
+        data=demo_links,
+    )
+
+    return render_template("admin_demo_link.html", demo_links=table)
 
 
-@bp_admin.route("/demo_link/new")
+@bp_admin.route("/new")
 def demo_link_new() -> str:
-    return render_template("demo_link_form.html")
+    return render_template("admin_demo_link_form.html")
 
 
-@bp_admin.route("/demo_link/<int:id>")
-def demo_link_form(id: int) -> str:
+@bp_admin.route("/edit/")
+@bp_admin.route("/edit/<int:demo_id>")
+def demo_link_form(demo_id: int) -> str:
     db = get_db()
-    demo_link_row = db.execute("SELECT * FROM demo_links WHERE id=?", [id]).fetchone()
+    demo_link_row = db.execute("SELECT * FROM demo_links WHERE id=?", [demo_id]).fetchone()
     demo_link_url = f"/demo/{demo_link_row['name']}"
-    return render_template("demo_link_form.html", demo_link=demo_link_row, demo_link_url=demo_link_url)
+    return render_template("admin_demo_link_form.html", demo_link=demo_link_row, demo_link_url=demo_link_url)
 
 
-@bp_admin.route("/demo_link/update", methods=['POST'])
+@bp_admin.route("/update", methods=['POST'])
 def demo_link_update() -> Response:
     db = get_db()
 
@@ -120,4 +134,4 @@ def demo_link_update() -> Response:
         db.commit()
         flash("Demo link updated.")
 
-    return redirect(url_for(".demo_link_form", id=demo_link_id))
+    return redirect(url_for(".demo_link_form", demo_id=demo_link_id))

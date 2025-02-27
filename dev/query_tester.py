@@ -5,62 +5,36 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 
 import argparse
-import csv
 import itertools
+from pathlib import Path
 
-from dotenv import load_dotenv
-import openai
+import litellm
 import pyperclip
 import urwid
+from loaders import (
+    get_available_prompts,
+    load_prompt,
+    load_queries,
+    make_prompt,
+    reload_prompt,
+    test_and_report_model,
+)
 
-from inspect import Parameter
-import importlib
-import inspect
-import sys
-import os
-
-
-TEMPERATURE = 0.5
+DEFAULT_MODEL = "gpt-3.5-turbo"
+TEMPERATURE = 0.25
 MAX_TOKENS = 1000
 
 
-def msgs2str(messages):
+def msgs2str(messages: list[dict[str, str]]) -> str:
     return "\n".join(
         f"{msg['role']}: {msg['content']}" for msg in messages
     )
 
 
-def load_queries(filename):
-    with open(filename) as csvfile:
-        reader = csv.DictReader(csvfile)
-        return list(reader), reader.fieldnames
-
-
-def load_prompt(app, csv_headers):
-    # Let the user choose a prompt function from the specified app
-    prompts_module = importlib.import_module(f"{app}.prompts")
-    prompt_functions = inspect.getmembers(prompts_module, inspect.isfunction)
-    print("[33mChoose a prompt function:[m")
-    for i, (name, func) in enumerate(prompt_functions):
-        print(f" {i+1}: {name}")
-    choice = int(input("Choice: "))
-    prompt_func = prompt_functions[choice-1][1]
-
-    # Get the required arguments / fields for the chosen prompt
-    sig = inspect.signature(prompt_func)
-    fields = [name for name in sig.parameters if sig.parameters[name].default == Parameter.empty]  # only args w/o default values for now
-
-    # Check for headers in the given CSV matching the prompt's arguments
-    missing = [field for field in fields if field not in csv_headers]
-    if missing:
-        print(f"[31mMissing columns in CSV needed for prompt:[m {missing}")
-        sys.exit(1)
-
-    return prompt_func, fields
-
-
 class QueryView(urwid.WidgetWrap):
-    def __init__(self, queries, fields, footer_counter):
+    def __init__(self, model, prompt_func, queries, fields, footer_counter):
+        self._model = model
+        self._prompt_func = prompt_func
         self._queries = queries
         self._fields = fields
         self._footcnt = footer_counter
@@ -70,9 +44,15 @@ class QueryView(urwid.WidgetWrap):
         self.update()
         urwid.WidgetWrap.__init__(self, self._box)
 
-    def update(self):
+    def set_prompt_func(self, new_func) -> None:
+        self._prompt_func = new_func
+
+    def update(self) -> None:
         self._footcnt.set_text(f"{self.curidx + 1} / {len(self._queries)}")
         item = self._queries[self.curidx]
+        messages = make_prompt(self._prompt_func, item)
+        item['__tester_prompt'] = messages
+
         col_w = 15
         new_contents = list(itertools.chain.from_iterable(
             (
@@ -86,10 +66,15 @@ class QueryView(urwid.WidgetWrap):
         ))
         new_contents.extend([
             urwid.Divider('-'),
+        ])
+        new_contents.extend([
             urwid.Columns([
-                (col_w, urwid.Text(('label', "Prompt: "), 'right')),
-                urwid.Text(item.get('__tester_prompt', '')),
-            ]),
+                (col_w, urwid.Text(('prompt_label', f"{msg['role']}: "), 'right')),
+                urwid.Text(msg['content']),
+            ])
+            for msg in item.get('__tester_prompt', [])
+        ])
+        new_contents.extend([
             urwid.Divider('-'),
             urwid.Columns([
                 (col_w, urwid.Text(('response_label', "Usage: "), 'right')),
@@ -105,66 +90,47 @@ class QueryView(urwid.WidgetWrap):
 
         self._contents[:] = new_contents
 
-    def next(self):
+    def next(self) -> None:
         if self.curidx == len(self._queries) - 1:
             return
         self.curidx += 1
         self.update()
 
-    def prev(self):
+    def prev(self) -> None:
         if self.curidx == 0:
             return
         self.curidx -= 1
         self.update()
 
-    def copy_prompt(self):
+    def copy_prompt(self) -> None:
         cur_prompt = self._queries[self.curidx]['__tester_prompt']
-        pyperclip.copy(cur_prompt)
+        prompt_str = msgs2str(cur_prompt)
+        pyperclip.copy(prompt_str)
 
+    def clear_response(self) -> None:
+        item = self._queries[self.curidx]
+        item['__tester_response'] = ""
+        item['__tester_usage'] = ""
 
-def get_prompt(item, prompt_func):
-    # Call the prompt function with arguments from the current item
-    args = [item[name] for name in inspect.signature(prompt_func).parameters if name in item]
-    prompt_gen = prompt_func(*args)
+        self.update()
 
-    if isinstance(prompt_gen, list):
-        # The prompt function outputs in the chat completion format, not a string,
-        # and the davinci model does not handle chat completions.
-        prompt = None
-        messages = prompt_gen
-    else:
-        prompt = prompt_gen
-        messages = [{"role": "user", "content": prompt}]
+    def get_response(self) -> None:
+        item = self._queries[self.curidx]
+        messages = make_prompt(self._prompt_func, item)
 
-    return prompt, messages
-
-
-def get_response(item, prompt, messages, model):
-    '''
-    model can be either 'text-davinci-003' or 'gpt-{4, 3.5-turbo, etc.}'
-    '''
-    try:
-        if model.startswith("text-davinci") or model.endswith("-instruct"):
-            assert (prompt is not None), "Invalid prompt function for using with text-davinci (outputs messages for a chat completion only)."
-            response = openai.Completion.create(
-                model=model,
-                prompt=prompt,
-                temperature=TEMPERATURE,
-                max_tokens=MAX_TOKENS,
-            )
-            response_txt = response.choices[0].text
-        elif model.startswith("gpt-"):
-            response = openai.ChatCompletion.create(
-                model=model,
+        try:
+            response = litellm.completion(
+                model=self._model,
                 messages=messages,
                 temperature=TEMPERATURE,
                 max_tokens=MAX_TOKENS,
-                n=2,
+                n=1,
             )
-            response_txt = '\n\n----------\n\n'.join(x.message['content'] for x in response.choices)
-        else:
-            raise Exception(f"Invalid model specified: {model}")
+        except Exception as e:  # noqa
+            item['__tester_response'] = f"[An error occurred in the openai completion.]\n{e}"
+            return
 
+        response_txt = '\n\n----------\n\n'.join(x.message.content for x in response.choices)
         response_reason = response.choices[-1].finish_reason  # e.g. "length" if max_tokens reached
 
         if response_reason == "length":
@@ -172,41 +138,35 @@ def get_response(item, prompt, messages, model):
 
         item['__tester_response'] = response_txt
 
-        item['__tester_usage'] = f"Prompt: {response.usage['prompt_tokens']}  Completion: {response.usage['completion_tokens']}  Total: {response.usage['total_tokens']}"
+        item['__tester_usage'] = f"Prompt: {response.usage.prompt_tokens}  Completion: {response.usage.completion_tokens}  Total: {response.usage.total_tokens}"
 
-    except Exception as e:  # noqa
-        item['__tester_response'] = f"[An error occurred in the openai completion.]\n{e}"
-
-
-def setup_openai():
-    # load config values from .env file
-    load_dotenv()
-    try:
-        openai_key = os.environ["OPENAI_API_KEY"]
-        openai.api_key = openai_key
-    except KeyError:
-        print("Error:  OPENAI_API_KEY environment variable not set.", file=sys.stderr)
-        sys.exit(1)
+        self.update()
 
 
-def main():
-    setup_openai()
-
+def main() -> None:
     # Setup / run config
-    parser = argparse.ArgumentParser(description='A tool for running queries against data from a CSV file.')
-    parser.add_argument('filename', type=str, help='The filename of the CSV file to be read.')
+    parser = argparse.ArgumentParser(description='A tool for running queries against data from a CSV/ODS/XLSX file.')
     parser.add_argument('app', type=str, help='The name of the application module from which to load prompts (e.g., codehelp or starburst).')
+    parser.add_argument('file_path', type=Path, help='Path to the file to be read.')
     parser.add_argument(
-        'model', type=str, nargs='?', default='gpt-3.5-turbo',
-        help='(Optional. Default="gpt-3.5-turbo")  The LLM to use (text-davinci-003 or gpt-{3.5-turbo, 4, etc.}).'
+        'model', type=str, nargs='?', default=DEFAULT_MODEL,
+        help=f"(Optional. Default='{DEFAULT_MODEL}')  The LLM to use."
     )
     args = parser.parse_args()
 
+    test_and_report_model(args.model)
+
     # Load data
-    queries, csv_headers = load_queries(args.filename)
+    queries, headers = load_queries(args.file_path)
 
     # Initialize the prompt
-    prompt_func, fields = load_prompt(args.app, csv_headers)
+    prompts = list(get_available_prompts(args.app).keys())
+    print("\x1B[33mChoose a prompt function:\x1B[m")
+    for i, name in enumerate(prompts):
+       print(f" {i+1}: {name}")
+    choice = int(input("Choice: "))
+    prompt_name = prompts[choice-1]
+    prompt_func, fields = load_prompt(args.app, prompt_name, headers)
 
     # Make the UI
     header = urwid.AttrMap(urwid.Text("Query Tester"), 'header')
@@ -219,13 +179,14 @@ def main():
         ]),
         'footer'
     )
-    viewer = QueryView(queries, fields, footer_counter)
+    viewer = QueryView(args.model, prompt_func, queries, fields, footer_counter)
     frame = urwid.Frame(urwid.AttrMap(viewer, 'body'), header=header, footer=footer)
 
     palette = [
         ('header', 'black', 'light green'),
         ('footer', 'black', 'light cyan'),
         ('label', 'yellow', 'default'),
+        ('prompt_label', 'light green', 'default'),
         ('response_label', 'light red', 'default'),
     ]
 
@@ -233,26 +194,21 @@ def main():
     mainloop = None
 
     def unhandled(key):
-        nonlocal prompt_func  # to allow modifying prompt_func
         match key:
             case 'j':
                 viewer.next()
             case 'k':
                 viewer.prev()
             case 'g':
-                item = queries[viewer.curidx]
-                prompt, messages = get_prompt(item, prompt_func)
-                item['__tester_prompt'] = prompt if args.model.startswith('text-davinci') else msgs2str(messages)
-                viewer.update()
+                viewer.clear_response()
                 mainloop.draw_screen()
-                get_response(item, prompt, messages, args.model)
-                viewer.update()
+                viewer.get_response()
             case 'c':
                 viewer.copy_prompt()
             case 'r':
-                prompt_module = importlib.import_module(f"{args.app}.prompts")
-                importlib.reload(prompt_module)
-                prompt_func = getattr(prompt_module, prompt_func.__name__)  # get the new function using the old one's name
+                new_prompt_func = reload_prompt(args.app, prompt_func.__name__)  # get the new function using the old one's name
+                viewer.set_prompt_func(new_prompt_func)
+                viewer.update()
             case 'q':
                 raise urwid.ExitMainLoop()
 

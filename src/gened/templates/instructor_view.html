@@ -1,0 +1,37 @@
+{#
+SPDX-FileCopyrightText: 2023 Mark Liffiton <liffiton@gmail.com>
+
+SPDX-License-Identifier: AGPL-3.0-only
+#}
+
+{% extends "base.html" %}
+{% from "tables.html" import datatable, datatable_extrahead %}
+
+{% block extrahead %}
+{{ datatable_extrahead }}
+{% endblock extrahead %}
+
+{% block body %}
+<section class="section p-5">
+  <h1 class="title">{{ auth.cur_class.class_name }}</h1>
+  <div class="tbl_cols">
+    <div class="tbl_col" style="width: 35em;">
+      <h2 class="is-size-3">Users</h2>
+      {{ datatable(users) }}
+      <p><em>Users that are not active will not be able to access this class.</em></p>
+    </div>
+    <div class="tbl_col" style="width: 75em; flex-grow: 1;">
+      <h2 class="is-size-3">
+        Queries
+        {% if user %}
+        <a class="button is-info is-rounded p-3 mt-2" style="height: 2em;" href="?" title="Remove filter">
+          user = {{user}}
+          <span class="delete is-small is-link ml-2"></span>
+        </a>
+        {% endif %}
+      </h2>
+      {{ datatable(queries) }}
+    </div>
+  </div>
+</section>
+{% endblock body %}

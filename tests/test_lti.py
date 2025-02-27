@@ -3,7 +3,6 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 
 import pytest
-
 from oauthlib import oauth1
 
 CLASS = {
@@ -59,11 +58,11 @@ class LTIConsumer:
         return uri, headers, body
 
 
-@pytest.mark.parametrize(('consumer_key', 'consumer_secret'), (
+@pytest.mark.parametrize(('consumer_key', 'consumer_secret'), [
     ('', ''),   # no consumer, no secret: invalid LTI communication
     ('invalid_consumer.domain', 'secret'),   # consumer not registered in app
     ('consumer.domain', 'wrong_secret'),   # consumer registered (see test_data.sql), but wrong secret provided
-))
+])
 def test_lti_auth_failure(client, consumer_key, consumer_secret):
     lti = LTIConsumer(consumer_key, consumer_secret)
     uri, headers, body = lti.generate_launch_request("Instructor")
@@ -71,11 +70,11 @@ def test_lti_auth_failure(client, consumer_key, consumer_secret):
     assert result.text == "There was an LTI communication error"
 
 
-@pytest.mark.parametrize(('role', 'internal_role'), (
+@pytest.mark.parametrize(('role', 'internal_role'), [
     ('Instructor', 'instructor'),
     ('urn:lti:role:ims/lis/TeachingAssistant', 'instructor'),  # canvas TA
     ('Student', 'student'),
-))
+])
 def test_lti_auth_success(client, role, internal_role):
     # key and secret match 'consumer.domain' consumer in test_data.sql
     lti = LTIConsumer('consumer.domain', 'seecrits1')
@@ -86,7 +85,10 @@ def test_lti_auth_success(client, role, internal_role):
     assert "LTI communication error" not in result.text
     # success == redirect to help page...
     assert result.status_code == 302
-    assert result.location == '/help/'
+    if internal_role == 'instructor':
+        assert result.location == '/instructor/config/'
+    else:
+        assert result.location == '/help/'
 
     result = client.get('/help/')
     assert result.status_code == 200
@@ -161,33 +163,24 @@ def test_lti_instructor_and_students(client):
     uri, headers, body = lti.generate_launch_request("instructor")
     client.post(uri, headers=headers, data=body)
 
-    # 2) instructor configures the course
-    result = client.post(
-        '/instructor/config/set',
-        data={'default_lang': 1, 'avoid': ''},
-        follow_redirects=True
-    )
-    assert "Configuration set!" in result.text
-
+    # 2) instructor can access the course help page
     result = client.get('/help/')
-    assert result.status_code == 200  # ... and now it should work!
+    assert result.status_code == 200
     assert USER['fullname'] in result.text
-    assert "This class is not yet configured." not in result.text
 
     client.post('/auth/logout')
 
-    # 3) student 1 logs in
+    # 3) student 1 logs in, can access help page
     uri, headers, body = lti.generate_launch_request("student_1")
     client.post(uri, headers=headers, data=body)
 
     result = client.get('/help/')
     assert result.status_code == 200
-    assert "This class is not yet configured." not in result.text
 
     # 4) student 1 makes a query
-    result = client.post('/help/request', data={'lang_id': 1, 'code': 'student_1_code', 'error': 'error', 'issue': 'issue'})
+    result = client.post('/help/request', data={'code': 'student_1_code', 'error': 'error', 'issue': 'issue'})
     assert result.status_code == 302
-    assert result.location == "/help/view/5"  # next open query ID (test_data.sql inserts up to 4)
+    assert result.location == "/help/view/101"  # next open query ID (test_data.sql inserts max 100)
     result = client.get(result.location)
     assert result.status_code == 200
     assert 'student_1_code' in result.text
@@ -200,11 +193,10 @@ def test_lti_instructor_and_students(client):
 
     result = client.get('/help/')
     assert result.status_code == 200
-    assert "This class is not yet configured." not in result.text
 
     # 6) student 2 cannot see student 1's query
-    result = client.get('/help/view/5')
-    assert result.status_code == 200
+    result = client.get('/help/view/101')
+    assert result.status_code == 400
     assert 'student_1_code' not in result.text
     assert 'Invalid id.' in result.text
 
@@ -214,7 +206,7 @@ def test_lti_instructor_and_students(client):
     uri, headers, body = lti.generate_launch_request("instructor")
     client.post(uri, headers=headers, data=body)
 
-    result = client.get('/help/view/5')
+    result = client.get('/help/view/101')
     assert result.status_code == 200
     assert 'student_1_code' in result.text
     assert 'Invalid id.' not in result.text

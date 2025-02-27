@@ -3,12 +3,17 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 
 import itertools
+import sys
 from collections.abc import Iterable
 from datetime import datetime
 from importlib import resources
-from importlib.abc import Traversable
 from pathlib import Path
 from typing import TypedDict
+
+if sys.version_info >= (3, 11):
+    from importlib.resources.abc import Traversable
+else:
+    from importlib.abc import Traversable  # - Deprecated in 3.12, removed in 3.14
 
 import click
 from flask import current_app
@@ -19,7 +24,6 @@ from .db import backup_db, get_db, on_init_db
 
 class MigrationDict(TypedDict):
     name: str
-    path: Path
     contents: str
     mtime: float
     applied_on: str | None
@@ -67,6 +71,8 @@ def _apply_migrations(migrations: Iterable[MigrationDict]) -> None:
     backup_dir = Path(current_app.instance_path) / "backups"
     backup_dir.mkdir(mode=0o770, exist_ok=True)
     backup_dest = backup_dir / f"{current_app.config['DATABASE_NAME']}.{timestamp}.bak"
+    if current_app.config.get('AGE_PUBLIC_KEY'):
+        backup_dest = backup_dest.with_suffix('.age')
 
     backup_db(backup_dest)
 
@@ -90,11 +96,10 @@ def _apply_migrations(migrations: Iterable[MigrationDict]) -> None:
 def _migration_info(resource: Traversable) -> MigrationDict:
     """Get info on a migration, provided as an importlib.resources resource."""
     db = get_db()
-    with resources.as_file(resource) as path, path.open() as f:
+    with resources.as_file(resource) as path, path.open(encoding="utf-8") as f:
         name = path.name
         info: MigrationDict = {
             'name': name,
-            'path': path,
             'contents': f.read(),
             'mtime': path.stat().st_mtime,
             'applied_on': None,
@@ -114,14 +119,14 @@ def _get_migrations() -> list[MigrationDict]:
     # Pull shared Gen-ed migrations and app-specific migrations
     gened_migrations = resources.files('gened').joinpath("migrations")
     app_migrations = resources.files(current_app.name).joinpath("migrations")
-    migration_files = itertools.chain(
+    migration_resources = itertools.chain(
         *(x.iterdir() for x in (gened_migrations, app_migrations) if x.is_dir())
     )
 
     # Collect info and sort by name and modified time (to apply migrations in order)
     migrations = [
         _migration_info(res)
-        for res in migration_files
+        for res in migration_resources
         if not res.name.startswith('.') and res.name.endswith('.sql')
     ]
     migrations.sort(key=lambda x: (x['name'], x['mtime']))
@@ -162,12 +167,10 @@ def migrate_command() -> None:
     click.echo()
     click.echo(f"Key:  {status_new}  = new  {status_success}  = applied successfully  {status_skipped}  = skipped  {status_failed}  = failed to apply")
     click.echo()
-    choice = input(f"[1-{len(migrations)}] Select individual migration   [A]pply all new or failed migrations  [M]ark all as successfully applied  [Q]uit   Choice? ")
+    choice = input("[A]pply all new or failed migrations  [M]ark all as successfully applied  [Q]uit   Choice? ")
     click.echo()
 
-    if choice.isnumeric() and 1 <= int(choice) <= len(migrations):
-        click.echo("Individual selection not yet implemented.")
-    elif choice.lower() == 'm':
+    if choice.lower() == 'm':
         sure = input("Are you sure?  This should pretty much never be used... [yN] ")
         if sure.lower() == 'y':
             _mark_all_as_applied()

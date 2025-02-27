@@ -1,0 +1,52 @@
+name: Python type checks and tests
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+permissions:
+  contents: read
+
+jobs:
+  typecheck:
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.12"]  # earliest supported plus most recent release [dropping 3.13 until mypy#18216 is resolved]
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+        cache: 'pip'
+    - name: Install dependencies
+      run: |
+        pip install --upgrade pip wheel
+        pip install -e .[test]
+    - name: Type check with mypy
+      run: |
+        mypy
+
+  test:
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+        cache: 'pip'
+    - name: Install dependencies
+      run: |
+        pip install --upgrade pip wheel
+        pip install -e .[test]
+    - name: Test with pytest
+      run: |
+        pytest

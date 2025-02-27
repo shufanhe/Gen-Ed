@@ -5,13 +5,18 @@ SPDX-License-Identifier: AGPL-3.0-only
 #}
 
 {% extends "base.html" %}
+{% from "tables.html" import datatable, datatable_extrahead %}
+
+{% block extrahead %}
+{{ datatable_extrahead }}
+{% endblock extrahead %}
 
 {% block second_nav %}
 <nav class="navbar is-light is-size-5" role="navigation" aria-label="admin navigation" x-data="{admin_menu_open: false}">
   <div class="navbar-brand">
-    <a class="navbar-item has-text-danger is-tab {{ 'is-active' if request.endpoint == 'admin.main' else ''}}" href="{{url_for('admin.main')}}">
+    <a class="navbar-item has-text-danger is-tab {{ 'is-active' if request.endpoint == 'admin.admin_main.main' else ''}}" href="{{url_for('admin.admin_main.main')}}">
       <span class="icon">
-        <svg aria-hidden="true"><use href="#svg_admin"></svg>
+        <svg aria-hidden="true"><use href="#svg_admin" /></svg>
       </span>
       <span>Admin</span>
     </a>
@@ -23,22 +28,24 @@ SPDX-License-Identifier: AGPL-3.0-only
   </div>
   <div class="navbar-menu" x-bind:class="admin_menu_open ? 'is-active' : ''">
     <div class="navbar-start">
-      {% for page in admin_links %}
-        <a class="navbar-item is-tab {{ 'is-active' if request.endpoint == page[0] else ''}}" href="{{url_for(page[0])}}">{{page[1]}}</a>
+      {% for link in admin_links %}
+        <a class="navbar-item is-tab {{ 'is-active' if request.endpoint == link.endpoint else ''}}" href="{{url_for(link.endpoint)}}">{{link.display}}</a>
       {% endfor %}
     </div>
     <div class="navbar-end">
-      {% for page in admin_links_right %}
-        <a class="navbar-item is-tab {{ 'is-active' if request.endpoint == page[0] else ''}}" href="{{url_for(page[0])}}">{{page[1]}}</a>
+      {% for link in admin_links_right %}
+        <a class="navbar-item is-tab {{ 'is-active' if request.endpoint == link.endpoint else ''}}" href="{{url_for(link.endpoint)}}">
+          {{link.display}}
+        </a>
       {% endfor %}
     </div>
   </div>
 </nav>
-{% endblock %}
+{% endblock second_nav %}
 
 {% block body %}
 <section class="section pt-3 pb-4 pl-5 pr-5">
   {% block admin_body %}
-  {% endblock %}
+  {% endblock admin_body %}
 </section>
-{% endblock %}
+{% endblock body %}

@@ -2,14 +2,17 @@
 #
 # SPDX-License-Identifier: AGPL-3.0-only
 
+import random
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from functools import wraps
 from sqlite3 import Row
-from typing import ParamSpec, TypedDict, TypeVar
+from typing import Literal, ParamSpec, TypeVar
 
 from flask import (
     Blueprint,
     abort,
+    current_app,
     flash,
     g,
     redirect,
@@ -22,28 +25,57 @@ from werkzeug.security import check_password_hash
 from werkzeug.wrappers.response import Response
 
 from .db import get_db
+from .redir import safe_redirect_next
 
 # Constants
 AUTH_SESSION_KEY = "__gened_auth"
 
+AuthProviderExt = Literal['lti', 'google', 'github', 'microsoft']
+AuthProviderLocal = Literal['local', 'demo']
+AuthProvider = AuthProviderExt | AuthProviderLocal
+RoleType = Literal['instructor', 'student']
 
-class ClassDict(TypedDict):
+@dataclass
+class LoginData:
+    ext_id: str  # external authentication provider user ID
+    email: str | None = None
+    full_name: str | None = None
+    auth_name: str | None = None
+    anon: bool = False
+
+@dataclass(frozen=True)
+class UserData:
+    id: int
+    display_name: str
+    auth_provider: AuthProvider
+    is_admin: bool = False
+    is_tester: bool = False
+
+@dataclass(frozen=True)
+class ClassData:
     class_id: int
     class_name: str
-    role: str
+    role_id: int
+    role: RoleType
 
+@dataclass(frozen=True)
+class AuthData:
+    user: UserData | None = None
+    cur_class: ClassData | None = None
+    class_experiments: list[str] = field(default_factory=list)  # any experiments the current class is registered in
+    other_classes: list[ClassData] = field(default_factory=list)  # for storing active classes that are not the user's current class
 
-class AuthDict(TypedDict, total=False):
-    user_id: int | None
-    auth_provider: str
-    display_name: str
-    is_admin: bool
-    is_tester: bool
-    role_id: int | None     # current role
-    role: str | None        # current role name (e.g., 'instructor')
-    class_id: int | None    # current class ID
-    class_name: str | None  # current class name
-    other_classes: list[ClassDict]  # for storing active classes that are not the user's current class
+    @property
+    def user_id(self) -> int | None:
+        return self.user.id if self.user else None
+
+    @property
+    def is_admin(self) -> bool:
+        return bool(self.user and self.user.is_admin)
+
+    @property
+    def is_tester(self) -> bool:
+        return bool(self.user and self.user.is_tester)
 
 
 def _invalidate_g_auth() -> None:
@@ -58,43 +90,37 @@ def set_session_auth_user(user_id: int) -> None:
     """ Set the current session's user (on login, after authentication).
         Clears all other auth data in the session.
     """
-    auth: AuthDict = {
+    auth = {
         'user_id': user_id,
     }
     session[AUTH_SESSION_KEY] = auth
     _invalidate_g_auth()
 
 
-def set_session_auth_role(role_id: int | None) -> None:
-    """ Set the current session's active role (on login or class switch).
+def set_session_auth_class(class_id: int | None) -> None:
+    """ Set the current session's active class (on login or class switch).
         Adds to any existing auth data in the session.
     """
-    auth: AuthDict = session[AUTH_SESSION_KEY]
-    auth['role_id'] = role_id
-    session[AUTH_SESSION_KEY] = auth
+    sess_auth = session.get(AUTH_SESSION_KEY, {})
+    assert 'user_id' in sess_auth
+    assert sess_auth['user_id'] is not None  # must be logged in already for this function to be valid
+    sess_auth['class_id'] = class_id
+    session[AUTH_SESSION_KEY] = sess_auth
     _invalidate_g_auth()
 
 
-def _get_auth_from_session() -> AuthDict:
+def _get_auth_from_session() -> AuthData:
     """ Populate auth data for the current session based on its current
-        user_id and role_id (if any).
+        user_id and class_id (if any).
     """
-    base: AuthDict = {
-        'user_id': None,
-        'is_admin': False,
-        'is_tester': False,
-        'role_id': None,
-        'role': None,
-    }
     # Get the session auth dict, or an empty dict if it's not there, to find
-    # current user_id and role_id (if any).
+    # current user_id (if any).
     sess_auth = session.get(AUTH_SESSION_KEY, {})
-    sess_user = sess_auth.get('user_id', None)
-    sess_role = sess_auth.get('role_id', None)
+    user_id = sess_auth.get('user_id', None)
 
-    if not sess_user:
-        # No logged in user; return the base/empty auth data
-        return base
+    if not user_id:
+        # No logged in user; return the default/empty auth data
+        return AuthData()
 
     db = get_db()
 
@@ -108,102 +134,143 @@ def _get_auth_from_session() -> AuthDict:
         FROM users
         LEFT JOIN auth_providers ON auth_providers.id=users.auth_provider
         WHERE users.id=?
-    """, [sess_user]).fetchone()
+    """, [user_id]).fetchone()
 
     if not user_row:
         # Fall through if user_id is not in database (deleted from DB?)
-        return base
+        return AuthData()
 
-    # Create a new AuthDict and populate with data from the database
-    auth_dict: AuthDict = {
-        # from session
-        'user_id': sess_user,
-        'role_id': sess_role,
-        # from DB
-        'display_name': user_row['display_name'],
-        'is_admin': user_row['is_admin'],
-        'is_tester': user_row['is_tester'],
-        'auth_provider': user_row['auth_provider'],
-        # to be filled
-        'class_id': None,
-        'class_name': None,
-        'role': None,
-        'other_classes': [],
-    }
+    # Collect auth data values
+    user = UserData(
+        id=user_id,
+        display_name=user_row['display_name'],
+        auth_provider=user_row['auth_provider'],
+        is_admin=user_row['is_admin'],
+        is_tester=user_row['is_tester'],
+    )
 
     # Check the database for any active roles (may be changed by another user)
     # and populate class/role information.
     # Uses WHERE active=1 to only allow active roles.
     role_rows = db.execute("""
         SELECT
-            roles.id,
+            roles.id AS role_id,
             roles.class_id,
+            roles.role,
             classes.name,
-            classes.enabled,
-            roles.role
+            classes.enabled
         FROM roles
         JOIN classes ON classes.id=roles.class_id
         WHERE roles.user_id=? AND roles.active=1
         ORDER BY roles.id DESC
-    """, [auth_dict['user_id']]).fetchall()
+    """, [user_id]).fetchall()
 
-    found_role = False  # track whether the current role from auth is actually found as an active role
-    if role_rows:
-        for row in role_rows:
-            if row['id'] == auth_dict['role_id']:
-                found_role = True
-                auth_dict['class_id'] = row['class_id']
-                auth_dict['class_name'] = row['name']
-                auth_dict['role'] = row['role']
-            elif row['enabled']:
-                # store a list of any other classes that are enabled (for switching UI)
-                class_dict: ClassDict = {
-                    'class_id': row['class_id'],
-                    'class_name': row['name'],
-                    'role': row['role'],
-                }
-                auth_dict['other_classes'].append(class_dict)
+    cur_class = None
+    class_experiments = []
+    other_classes = []
 
-    if not found_role:
-        # ensure we don't keep a role_id in auth if it's not a valid/active one
-        auth_dict['role_id'] = None
+    sess_class_id = sess_auth.get('class_id', None)
 
-    return auth_dict
+    for row in role_rows:
+        class_data = ClassData(
+            class_id=row['class_id'],
+            class_name=row['name'],
+            role_id=row['role_id'],
+            role=row['role'],
+        )
+        if row['class_id'] == sess_class_id:
+            assert cur_class is None  # sanity check: should only ever match one role/class
+            # capture class/role info
+            cur_class = class_data
+            # check for any registered experiments in the current class
+            experiment_class_rows = db.execute("SELECT experiments.name FROM experiments JOIN experiment_class ON experiment_class.experiment_id=experiments.id WHERE experiment_class.class_id=?", [sess_class_id]).fetchall()
+            class_experiments = [row['name'] for row in experiment_class_rows]
+        elif row['enabled']:
+            # store a list of any other classes that are enabled (for navbar switching UI)
+            other_classes.append(class_data)
+
+    # admin gets instructor role in all classes automatically
+    if user.is_admin and cur_class is None and sess_class_id is not None:
+        class_row = db.execute("SELECT name FROM classes WHERE id=?", [sess_class_id]).fetchone()
+        cur_class = ClassData(
+            class_id=sess_class_id,
+            class_name=class_row['name'],
+            role_id=-1,
+            role='instructor',
+        )
+
+    # return an AuthData with all collected values
+    return AuthData(
+        user=user,
+        cur_class=cur_class,
+        class_experiments=class_experiments,
+        other_classes=other_classes,
+    )
 
 
-def get_auth() -> AuthDict:
+def get_auth() -> AuthData:
     if 'auth' not in g:
         g.auth = _get_auth_from_session()
 
-    return g.auth
+    return g.auth  # type: ignore[no-any-return]
 
 
-def get_last_role(user_id: int) -> int | None:
-    """ Find and return the last role (as a role ID) for the given user,
-        as long as that role still exists and is currently active.
+def get_auth_class() -> ClassData:
+    auth = get_auth()
+    assert auth.cur_class
+    return auth.cur_class
 
-        Returns the role_id or None if nothing is found / matches.
+
+def get_last_class(user_id: int) -> int | None:
+    """ Find and return the last class (as a class ID) for the given user,
+        as long as the user still has an active role in that class.
+
+        Returns the class_id or None if nothing is found / matches.
     """
     db = get_db()
 
-    role_row = db.execute("""
-        SELECT roles.id AS role_id
-        FROM roles
-        JOIN users ON roles.user_id=users.id
+    class_row = db.execute("""
+        SELECT users.last_class_id AS class_id
+        FROM users
+        JOIN roles ON roles.user_id=users.id
         WHERE users.id=?
-          AND users.last_role_id=roles.id
+          AND roles.class_id=users.last_class_id
           AND roles.active=1
     """, [user_id]).fetchone()
 
-    if not role_row:
+    if not class_row:
         return None
 
-    role_id = role_row['role_id']
-    assert isinstance(role_id, int)
-    return role_id
+    class_id = class_row['class_id']
+    assert isinstance(class_id, int)
+    return class_id
 
 
-def ext_login_update_or_create(provider_name: str, user_normed: dict[str, str | None], query_tokens: int=0) -> Row:
+def generate_anon_username() -> str:
+    """Generates a username with two different adjectives and an animal"""
+    adjectives = [
+        "swift", "brave", "clever", "gentle", "kind",
+        "jolly", "noble", "happy", "wise", "bright",
+        "calm", "proud", "friendly", "merry", "cheerful"
+    ]
+
+    animals = [
+        "penguin", "dolphin", "squirrel", "butterfly", "rabbit",
+        "panda", "koala", "otter", "falcon", "sparrow",
+        "hedgehog", "tortoise", "giraffe", "zebra", "kangaroo",
+        "alpaca", "antelope", "hummingbird", "gazelle", "seahorse",
+        "owl", "dragonfly", "pelican", "crane", "lynx",
+        "leopard", "wolf", "eagle", "deer", "swan"
+    ]
+
+    # Get two unique adjectives, one animal
+    adj1, adj2 = random.sample(adjectives, 2)
+    animal = random.choice(animals)
+    # Capitalize each word
+    return f"{adj1.capitalize()}{adj2.capitalize()}{animal.capitalize()}"
+
+
+def ext_login_update_or_create(provider_name: AuthProviderExt, userdata: LoginData, query_tokens: int=0) -> Row:
     """
     For an external authentication login:
       1. Create an account for the user if they do not already have an account (entry in users)
@@ -212,11 +279,11 @@ def ext_login_update_or_create(provider_name: str, user_normed: dict[str, str | 
 
     Parameters
     ----------
-    provider_name : str
-      Name of the external auth provider: in set {lti, google, github, microsoft}
-    user_normed : dict
-      User information.
-      Must contain non-null 'ext_id' key; must contain keys 'email', 'full_name', and 'auth_name', and at least one should be non-null.
+    provider_name : AuthProviderExt
+      Name of the external auth provider; see AuthProviderExt definition
+    userdata : LoginData
+      User login information.
+      Must contain non-null 'ext_id'; at least one of 'email', 'full_name', and 'auth_name' should be non-null, unless 'anon' is True.
     query_tokens : int (default 0)
       Number of query tokens to assign to the user *if* creating an account for them (on first login).
 
@@ -229,57 +296,73 @@ def ext_login_update_or_create(provider_name: str, user_normed: dict[str, str | 
     provider_row = db.execute("SELECT id FROM auth_providers WHERE name=?", [provider_name]).fetchone()
     provider_id = provider_row['id']
 
-    auth_row = db.execute("SELECT * FROM auth_external WHERE auth_provider=? AND ext_id=?", [provider_id, user_normed['ext_id']]).fetchone()
+    # check for existing user
+    auth_row = db.execute("SELECT * FROM auth_external WHERE auth_provider=? AND ext_id=?", [provider_id, userdata.ext_id]).fetchone()
 
     if auth_row:
+        # Found an existing user
         user_id = auth_row['user_id']
-        # Update w/ latest user info (name, email, etc. could conceivably change)
-        cur = db.execute(
-            "UPDATE users SET full_name=?, email=?, auth_name=? WHERE id=?",
-            [user_normed['full_name'], user_normed['email'], user_normed['auth_name'], user_id]
-        )
-        db.commit()
+        is_anon = auth_row['is_anon']
+
+        if not is_anon:
+            if userdata.anon:
+                flash("Warning: You've tried to log in anonymously, but this account was already registered with personal information.", "danger")
+            else:
+                # Update w/ latest user info (name, email, etc. could conceivably change)
+                cur = db.execute(
+                    "UPDATE users SET full_name=?, email=?, auth_name=? WHERE id=?",
+                    [userdata.full_name, userdata.email, userdata.auth_name, user_id]
+                )
+                db.commit()
 
     else:
-        # Create a new user account.
+        # No existing user.  Create a new user account.
+        if userdata.anon:
+            assert userdata.full_name is userdata.email is userdata.auth_name is None
+            userdata.full_name = generate_anon_username()
+
         cur = db.execute(
             "INSERT INTO users (auth_provider, full_name, email, auth_name, query_tokens) VALUES (?, ?, ?, ?, ?)",
-            [provider_id, user_normed['full_name'], user_normed['email'], user_normed['auth_name'], query_tokens]
+            [provider_id, userdata.full_name, userdata.email, userdata.auth_name, query_tokens]
         )
         user_id = cur.lastrowid
-        db.execute("INSERT INTO auth_external(user_id, auth_provider, ext_id) VALUES (?, ?, ?)", [user_id, provider_id, user_normed['ext_id']])
+        db.execute("INSERT INTO auth_external(user_id, auth_provider, ext_id, is_anon) VALUES (?, ?, ?, ?)", [user_id, provider_id, userdata.ext_id, userdata.anon])
         db.commit()
+
+        current_app.logger.info(f"New acct: '{userdata.full_name}' {userdata.email} ({provider_name})")
 
     # get all values in newly updated/inserted row
     user_row = db.execute("SELECT * FROM users WHERE id=?", [user_id]).fetchone()
     assert isinstance(user_row, Row)
+    current_app.logger.debug(f"Signed in: '{user_row['full_name']}' {user_row['email']} ({provider_name})")
     return user_row
 
 
-bp = Blueprint('auth', __name__, url_prefix="/auth", template_folder='templates')
+bp = Blueprint('auth', __name__, template_folder='templates')
 
 
-@bp.route("/login", methods=['GET', 'POST'])
-def login() -> str | Response:
-    if request.method == 'POST':
-        username = request.form['username']
-        password = request.form['password']
-        db = get_db()
-        auth_row = db.execute("SELECT * FROM auth_local JOIN users ON auth_local.user_id=users.id WHERE username=?", [username]).fetchone()
-
-        if not auth_row or not check_password_hash(auth_row['password'], password):
-            flash("Invalid username or password.", "warning")
-        else:
-            # Success!
-            last_role_id = get_last_role(auth_row['id'])
-            set_session_auth_user(auth_row['id'])
-            set_session_auth_role(last_role_id)
-            next_url = request.form['next'] or url_for("helper.help_form")
-            return redirect(next_url)
-
-    # we either have a GET request or we fell through the POST login attempt with a failure
+@bp.route("/login")
+def login() -> str:
+    anonymous = request.args.get('anon')
     next_url = request.args.get('next', '')
-    return render_template("login.html", next_url=next_url)
+    return render_template("login.html", hide_login_button=True, anonymous=anonymous, next_url=next_url)
+
+@bp.route("/local_login", methods=['POST'])
+def local_login() -> Response:
+    username = request.form['username']
+    password = request.form['password']
+    db = get_db()
+    auth_row = db.execute("SELECT * FROM auth_local JOIN users ON auth_local.user_id=users.id WHERE username=?", [username]).fetchone()
+
+    if not auth_row or not check_password_hash(auth_row['password'], password):
+        flash("Invalid username or password.", "warning")
+        return redirect(url_for(".login", next=request.form.get('next')))
+    else:
+        # Success!
+        last_class_id = get_last_class(auth_row['id'])
+        set_session_auth_user(auth_row['id'])
+        set_session_auth_class(last_class_id)
+        return safe_redirect_next(default_endpoint="helper.help_form")
 
 
 @bp.route("/logout", methods=['POST'])
@@ -299,7 +382,7 @@ def login_required(f: Callable[P, R]) -> Callable[P, Response | R]:
     @wraps(f)
     def decorated_function(*args: P.args, **kwargs: P.kwargs) -> Response | R:
         auth = get_auth()
-        if not auth['user_id']:
+        if not auth.user:
             flash("Login required.", "warning")
             return redirect(url_for('auth.login', next=request.full_path))
         return f(*args, **kwargs)
@@ -310,7 +393,7 @@ def instructor_required(f: Callable[P, R]) -> Callable[P, Response | R]:
     @wraps(f)
     def decorated_function(*args: P.args, **kwargs: P.kwargs) -> Response | R:
         auth = get_auth()
-        if auth['role'] != "instructor":
+        if auth.cur_class is None or auth.cur_class.role != "instructor":
             flash("Instructor login required.", "warning")
             return redirect(url_for('auth.login', next=request.full_path))
         return f(*args, **kwargs)
@@ -321,13 +404,13 @@ def class_enabled_required(f: Callable[P, R]) -> Callable[P, str | R]:
     @wraps(f)
     def decorated_function(*args: P.args, **kwargs: P.kwargs) -> str | R:
         auth = get_auth()
-        class_id = auth['class_id']
 
-        if class_id is None:
+        if auth.cur_class is None:
             # No active class, no problem
             return f(*args, **kwargs)
 
         # Otherwise, there's an active class, so we require it to be enabled.
+        class_id = auth.cur_class.class_id
         db = get_db()
         class_row = db.execute("SELECT * FROM classes WHERE id=?", [class_id]).fetchone()
         if not class_row['enabled']:
@@ -344,7 +427,7 @@ def admin_required(f: Callable[P, R]) -> Callable[P, Response | R]:
     @wraps(f)
     def decorated_function(*args: P.args, **kwargs: P.kwargs) -> Response | R:
         auth = get_auth()
-        if not auth['is_admin']:
+        if not auth.is_admin:
             flash("Login required.", "warning")
             return redirect(url_for('auth.login', next=request.full_path))
         return f(*args, **kwargs)
@@ -356,7 +439,7 @@ def tester_required(f: Callable[P, R]) -> Callable[P, Response | R]:
     @wraps(f)
     def decorated_function(*args: P.args, **kwargs: P.kwargs) -> Response | R:
         auth = get_auth()
-        if not auth['is_tester']:
+        if not auth.is_tester:
             return abort(404)
         return f(*args, **kwargs)
     return decorated_function

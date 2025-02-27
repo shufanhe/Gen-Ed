@@ -14,18 +14,29 @@ from flask import (
     session,
     url_for,
 )
-from pylti.flask import lti
+from pylti.flask import LTI  # type: ignore [import-untyped]
+from pylti.flask import lti as lti_flask
 from werkzeug.wrappers.response import Response
 
 from .auth import (
+    LoginData,
     ext_login_update_or_create,
-    set_session_auth_role,
+    set_session_auth_class,
     set_session_auth_user,
 )
 from .classes import get_or_create_lti_class
 from .db import get_db
 
-bp = Blueprint('lti', __name__, url_prefix="/lti", template_folder='templates')
+bp = Blueprint('lti', __name__, template_folder='templates')
+
+
+def reload_consumers() -> None:
+    db = get_db()
+    consumer_rows = db.execute("SELECT * FROM consumers").fetchall()
+    consumer_dict = {
+        row['lti_consumer']: {"secret": row['lti_secret']} for row in consumer_rows
+    }
+    current_app.config['PYLTI_CONFIG']['consumers'] = consumer_dict
 
 
 # An LTI-specific error handler
@@ -39,8 +50,8 @@ def lti_error(exception: dict[str, Any]) -> tuple[str, int]:
 # https://github.com/mitodl/pylti/blob/master/pylti/flask.py
 # https://github.com/mitodl/mit_lti_flask_sample
 @bp.route("/", methods=['GET', 'POST'])
-@lti(request='initial', error=lti_error)
-def lti_login(lti=lti) -> Response | tuple[str, int]:
+@lti_flask(request='initial', error=lti_error)  # type: ignore [misc]
+def lti_login(lti: LTI) -> Response | tuple[str, int]:  # noqa: ARG001 (unused argument required by lti_flask decorator)
     authenticated = session.get("lti_authenticated", False)
     role = session.get("roles", "").lower()
     full_name = session.get("lis_person_name_full", None)
@@ -50,7 +61,7 @@ def lti_login(lti=lti) -> Response | tuple[str, int]:
     lti_context_id = session.get("context_id", "")
     class_name = session.get("context_label", "")
 
-    current_app.logger.info(f"LTI login: {lti_consumer=} {full_name=} {email=} {role=} {class_name=}")
+    current_app.logger.debug(f"LTI login: {lti_consumer=} {full_name=} {email=} {role=} {class_name=}")
 
     # sanity checks
     if not authenticated:
@@ -88,14 +99,13 @@ def lti_login(lti=lti) -> Response | tuple[str, int]:
 
     # check for and create user account if needed
     lti_id = f"{lti_consumer}_{lti_user_id}_{email}"
-    user_normed = {
-        'email': email,
-        'full_name': full_name,
-        'auth_name': None,
-        'ext_id': lti_id,
-    }
-    # LTI users given 0 tokens by default -- should only ever use API registered w/ LTI consumer
-    user_row = ext_login_update_or_create('lti', user_normed, query_tokens=10)
+    user_normed = LoginData(
+        ext_id=lti_id,
+        email=email,
+        full_name=full_name,
+    )
+    # LTI users given 0 tokens by default -- should only ever use API key registered w/ LTI consumer
+    user_row = ext_login_update_or_create('lti', user_normed, query_tokens=0)
     user_id = user_row['id']
 
     # check for and create role if needed
@@ -105,22 +115,21 @@ def lti_login(lti=lti) -> Response | tuple[str, int]:
 
     if not role_row:
         # Register this user
-        cur = db.execute("INSERT INTO roles(user_id, class_id, role) VALUES(?, ?, ?)", [user_id, class_id, role])
+        db.execute("INSERT INTO roles(user_id, class_id, role) VALUES(?, ?, ?)", [user_id, class_id, role])
         db.commit()
-        role_id = cur.lastrowid
-    else:
-        role_id = role_row['id']
-
-        if not role_row['active']:
-            session.clear()
-            return abort(403)
+    elif not role_row['active']:
+        session.clear()
+        return abort(403)
 
     # Record them as logged in in the session
     set_session_auth_user(user_id)
-    set_session_auth_role(role_id)
+    set_session_auth_class(class_id)
 
     # Redirect to the app
-    return redirect(url_for("helper.help_form"))
+    if role == "instructor":
+        return redirect(url_for("class_config.config_form"))
+    else:
+        return redirect(url_for("helper.help_form"))
 
 
 @bp.route("/config.xml")
@@ -130,5 +139,5 @@ def lti_config() -> tuple[str, int, dict[str, str]]:
 
 #@bp.route("debug", methods=['GET'])
 #@lti(request='session')
-#def lti_debug(lti=lti):
+#def lti_debug(lti: LTI):
 #    return {var: session[var] for var in session}
