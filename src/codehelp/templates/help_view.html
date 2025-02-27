@@ -45,6 +45,38 @@ SPDX-License-Identifier: AGPL-3.0-only
       </div>
       {% endif %}
 
+      {% if assignment_name %}
+      <div class="field is-horizontal">
+        <div class="field-label">
+          <label class="label">Assignment:</label>
+        </div>
+        <div class="field-body">
+          <a onclick="document.querySelector('#assignment_dialog').showModal()">{{ assignment_name }}</a>
+        </div>
+      </div>
+
+      <dialog id="assignment_dialog" style="border: none; background: none; width: 75%; min-width: min(32em, 100vw);">
+        <div class="box">
+          <h3 class="subtitle is-4">{{ assignment_name }}</h3>
+          <p>{{ assignment_content }}</p>
+        </div>
+        <button class="modal-close is-large" aria-label="close" @click="closeModal"></button>
+      </dialog>
+      
+      <script type="text/JavaScript">
+        // close dialog on click outside
+        const dialog = document.querySelector("#assignment_dialog");
+        dialog.addEventListener('click', function (e) {
+            const rect = dialog.getBoundingClientRect();
+            const isInDialog=(rect.top <= e.clientY && e.clientY <= rect.top + rect.height
+              && rect.left <= e.clientX && e.clientX <= rect.left + rect.width);
+            if (!isInDialog) {
+                dialog.close();
+            }
+        });
+      </script>
+      {% endif %}
+
       <div class="field is-horizontal">
         <div class="field-label is-normal">
           <label class="label">Code:</label>

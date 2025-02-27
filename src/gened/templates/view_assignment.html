@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block body %}
+
+
+<style>
+    .container {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start; /* Align content to the left */
+      justify-content: flex-start; /* Align content to the top */
+      height: 100vh; /* Ensure the container takes up the full height of the viewport */
+      padding: 20px; /* Optional: Add padding for better aesthetics */
+    }
+  
+    h1 {
+      text-align: left; /* Align text within h1 to the left */
+      font-size: 24px; /* Adjust the font size for the assignment name */
+      margin-bottom: 10px; /* Optional: Add margin to separate h1 and p */
+    }
+  
+    p {
+      text-align: left; /* Align text within p to the left */
+      font-size: 16px; /* Adjust the font size for the content */
+    }
+  </style>
+  
+  <div class="container">
+    <form action="{{ url_for('instructor.view_assignment') }}" id="view_assignment">
+      <h1>{{ assignment.name }}</h1>
+      <p>{{ assignment.content }}</p>
+    </form>
+  </div>
+  
+  
+  
+  
+  
+  
+
+
+{% endblock %}

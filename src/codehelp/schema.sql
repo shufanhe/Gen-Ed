@@ -19,8 +19,10 @@ CREATE TABLE queries (
     helpful_emoji TEXT GENERATED ALWAYS AS (CASE helpful WHEN 1 THEN '✅' WHEN 0 THEN '❌' ELSE '' END) VIRTUAL,
     user_id INTEGER NOT NULL,
     role_id INTEGER,
+    assignment_id INTEGER,
     FOREIGN KEY(user_id) REFERENCES users(id),
-    FOREIGN KEY(role_id) REFERENCES roles(id)
+    FOREIGN KEY(role_id) REFERENCES roles(id),
+    FOREIGN KEY(assignment_id) REFERENCES assignments(id)
 );
 
 DROP TABLE IF EXISTS tutor_chats;

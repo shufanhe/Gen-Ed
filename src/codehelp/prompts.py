@@ -13,7 +13,7 @@ jinja_env = Environment(
 )
 
 
-def make_main_prompt(language: str, code: str, error: str, issue: str, avoid_set: Iterable[str] | None = None) -> str:
+def make_main_prompt(language: str, assignment_content: str, code: str, error: str, issue: str, avoid_set: Iterable[str] | None = None) -> str:
     # generate the extra / avoidance instructions
     if avoid_set is not None:
         extra_text = f"Do not use in your response: {', '.join(avoid_set)}."
@@ -27,11 +27,13 @@ def make_main_prompt(language: str, code: str, error: str, issue: str, avoid_set
     return f"""You are a system for assisting a student with programming.
 The students provide:
  1) the programming language (in "<lang>" delimiters)
+ 2) the assignment they are working on (in "<assignment_content>" delimiters)
  2) a relevant snippet of their code (in "<code_{nonce}>")
  3) an error message they are seeing (in "<error_{nonce}>")
  4) their issue or question and how they want assistance (in "<issue_{nonce}>")
 
 <lang>{language}</lang>
+<assignment_content>{assignment_content}</assignment_content>
 <code_{nonce}>
 {code}
 </code_{nonce}>
@@ -65,6 +67,7 @@ You are a system for assisting students with programming.
 
 I provide:
  - the programming language (in "<lang>" delimiters)
+ - the assignment instructions (in "<assignment_content>" delimiters)                                           
 {% if code %}
  - a relevant snippet of my code (in "<code>")
 {% endif %}
@@ -80,6 +83,9 @@ Here is my submission:
 <lang>
 {{language if language != 'C' else 'the C language'}}
 </lang>
+<assignment_content>
+{{assignment_content}}                                            
+</assignment_content>                                                                                       
 {% if code %}
 <code>
 {{code}}
@@ -102,8 +108,8 @@ Do not tell me how to correct anything.  Instead, please assess my submission an
 """)
 
 
-def make_sufficient_prompt(language: str, code: str, error: str, issue: str) -> str:
-    return sufficient_template.render(language=language, code=code, error=error, issue=issue)
+def make_sufficient_prompt(language: str, assignment_content: str, code: str, error: str, issue: str) -> str:
+    return sufficient_template.render(language=language, assignment_content=assignment_content, code=code, error=error, issue=issue)
 
 
 def make_cleanup_prompt(response_text: str) -> str:
@@ -115,10 +121,11 @@ Rewritten:
 """
 
 
-def make_topics_prompt(language: str, code: str, error: str, issue: str, response_text: str) -> list[dict[str, str]]:
+def make_topics_prompt(language: str, assignment_content: str, code: str, error: str, issue: str, response_text: str) -> list[dict[str, str]]:
     messages = [
         {'role': 'user', 'content': f"""\
 <language>{language}</language>
+<assignment>{assignment_content}</assignment>
 <code>{code}</code>
 <error>{error}</error>
 <issue>{issue}</issue>

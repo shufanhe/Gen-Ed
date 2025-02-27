@@ -18,6 +18,7 @@ DROP TABLE IF EXISTS classes_user;
 DROP TABLE IF EXISTS demo_links;
 DROP TABLE IF EXISTS migrations;
 DROP TABLE IF EXISTS models;
+DROP TABLE IF EXISTS assignments;
 
 PRAGMA foreign_keys = ON;  -- back on for good
 
@@ -164,3 +165,14 @@ INSERT INTO models(name, model) VALUES
     ('OpenAI GPT-4 Turbo', 'gpt-4-1106-preview')
 ;
 
+CREATE TABLE assignments (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    name            TEXT NOT NULL UNIQUE,
+    class_id        INTEGER NOT NULL,
+    creator_id      INTEGER NOT NULL,
+    content         TEXT NOT NULL,
+    created_on     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    is_deleted      BOOLEAN DEFAULT FALSE,
+    FOREIGN KEY(creator_id) REFERENCES users(id),
+    FOREIGN KEY(class_id) REFERENCES classes(id)
+);

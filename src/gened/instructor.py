@@ -12,6 +12,7 @@ from flask import (
     redirect,
     render_template,
     request,
+    url_for,
 )
 from werkzeug.wrappers.response import Response
 
@@ -202,3 +203,65 @@ def set_role_instructor(role_id: int, bool_instructor: int) -> str:
     db.commit()
 
     return "okay"
+
+
+@bp.route("/config/add_assignment")
+@instructor_required
+def add_assignment():
+
+    return render_template('add_assignment.html')
+
+
+@bp.route("/upload_assignment", methods=["POST"])
+@instructor_required
+def upload_assignment():
+    db = get_db()
+    auth = get_auth()
+
+    db.execute("INSERT INTO assignments (name, class_id, creator_id, content) VALUES (?, ?, ?, ?)", 
+               [request.form['assignment_name'], auth['class_id'], auth['user_id'], request.form['assignment_content']])
+    db.commit()
+    flash("Assignment has been uploaded.")
+    return redirect(url_for("class_config.config_form"))
+
+
+@bp.route("/config/view_assignment")
+@instructor_required
+def view_assignment():
+    db = get_db()
+    assignment_id = request.args.get('assignment_id')
+    assignment = db.execute("SELECT * from assignments WHERE id=? ", [assignment_id]).fetchone()        
+    return render_template("view_assignment.html", assignment=assignment)
+
+
+@bp.route("/delete_assignment", methods=["POST"])
+@instructor_required
+def delete_assignment():
+    db = get_db()
+
+    db.execute("UPDATE assignments SET is_deleted = TRUE WHERE id = ?", [request.form['assignment_id']])
+    db.commit()
+    flash("Assignment has been deleted")
+    return redirect(url_for("class_config.config_form"))
+
+
+@bp.route("/config/update_assignment")
+@instructor_required
+def update_assignment():
+    db = get_db()
+    assignment_id = request.args.get('assignment_id')
+    assignment = db.execute("SELECT * from assignments WHERE id=? ", [assignment_id]).fetchone()
+    return render_template('update_assignment.html', assignment=assignment)
+
+
+@bp.route("/post_assignment_update", methods=["POST"])
+@instructor_required
+def post_assignment_update():
+    db = get_db()
+    auth = get_auth()
+
+    db.execute("UPDATE assignments SET name=?, content=? WHERE class_id=? AND id=?", 
+               [request.form['assignment_name'], request.form['assignment_content'], auth['class_id'], request.form['id']])
+    db.commit()
+    flash("Assignment has been updated.")
+    return redirect(url_for("class_config.config_form"))

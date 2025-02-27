@@ -1,0 +1,47 @@
+
+      <div style="display: flex; align-items: center; justify-content: space-between;">
+        <h2 class="title is-size-4 mt-5">Assignments</h2>
+        <a class="icon-text is-size-6 has-text-grey" href="{{url_for ("instructor.add_assignment")}}" style="margin-right: 10px;">
+          <span class="icon">
+            <svg xmlns="http://www.w3.org/2000/svg" width="25" height="25" fill="currentColor" class="bi bi-plus-circle" viewBox="0 0 16 16">
+              <path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/>
+              <path d="M8 4a.5.5 0 0 1 .5.5v3h3a.5.5 0 0 1 0 1h-3v3a.5.5 0 0 1-1 0v-3h-3a.5.5 0 0 1 0-1h3v-3A.5.5 0 0 1 8 4z"/>
+            </svg>
+          </span>
+        </a>
+      </div>
+
+
+      <table class="table is-fullwidth" x-data="lang_config">
+        <tbody>
+          {% for assignment in assignments %}
+            <tr style="border-top: 1px solid #ccc;">
+              <td>
+                <a href="{{ url_for('instructor.view_assignment', assignment_id=assignment.id) }}" style="white-space: nowrap;" >{{ assignment.name }}</a>
+              </td>
+
+              <td class="has-text-centered">
+                <a href="{{ url_for('instructor.update_assignment', assignment_id=assignment.id) }}" class="button is-warning is-small" style="margin-left: 400px;">Update</a>
+              </td>
+
+              <td class="has-text-centered">
+                <form method="post" action="{{ url_for('instructor.delete_assignment')}}">
+                  <input type="hidden" name="assignment_id" value="{{ assignment.id }}">
+                  
+                  <div x-data="{ show_confirm: false }">
+                    <button class="button is-danger is-small ml-3" type="button" @click="show_confirm=true" x-bind:disabled="show_confirm">
+                      <span class="delete mr-2"></span> Delete
+                    </button>
+                
+                    <button class="button is-danger is-small" type="submit" name="delete_assignment" x-show="show_confirm">
+                      <b>Confirm</b>&nbsp;Delete Assignment
+                    </button>
+                  </div>
+                </form>
+
+              </td>
+
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>

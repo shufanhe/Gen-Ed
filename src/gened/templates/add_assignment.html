@@ -1,0 +1,62 @@
+
+
+{% extends "base.html" %}
+{% block body %}
+<div class="columns is-desktop is-gapless">
+  <div class="column is-three-quarters-desktop">
+    <section class="section">
+
+    <div class="container">
+      <form action="{{url_for('instructor.upload_assignment')}}" method="post">
+
+        <div class="field is-horizontal">
+          <div class="field-label is-normal">
+            <label class="label" for="assignmen_name">Assignment Name:</label>
+          </div>
+          <div class="field-body">
+            <div class="field">
+              <div class="control">
+                <textarea class="textarea" name="assignment_name" id="assignment_name" rows=1 cols=20 required></textarea>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="field is-horizontal">
+            <div class="field-label is-normal">
+              <label class="label" for="assignment_content">Assignment:</label>
+              <p class="has-text-grey">Please enter the assignment instructions here (text only).</p>
+            </div>
+            <div class="field-body">
+              <div class="field">
+                <div class="control">
+                  <textarea class="textarea" name="assignment_content" id="assignment_content" rows=20 cols= 112 required></textarea>
+                </div>
+              </div>
+            </div>
+          </div>
+
+
+          <div class="field is-horizontal">
+            <div class="field-label is-normal"><!-- spacing --></div>
+            <div class="field-body">
+              <div class="field">
+                <div class="control">
+                  <button
+                    class="button is-link"
+                    type="submit" >
+                  Upload Assignment
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+
+      </form>
+    </div>
+  </section>
+
+</div>
+</div>
+{% endblock %}

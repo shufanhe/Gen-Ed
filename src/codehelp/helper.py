@@ -31,6 +31,8 @@ def help_form(query_id: int | None = None) -> str:
     languages = class_config.languages
     selected_lang = class_config.default_lang
 
+    assignments = db.execute("SELECT * from assignments WHERE assignments.class_id=? AND assignments.is_deleted = FALSE ORDER BY id", [auth['class_id']]).fetchall()
+
     # Select most recently submitted language, if available
     lang_row = db.execute("SELECT language FROM queries WHERE queries.user_id=? ORDER BY query_time DESC LIMIT 1", [auth['user_id']]).fetchone()
     if lang_row and lang_row['language'] in languages:
@@ -45,20 +47,30 @@ def help_form(query_id: int | None = None) -> str:
 
     history = get_history()
 
-    return render_template("help_form.html", query=query_row, history=history, languages=languages, selected_lang=selected_lang)
+    return render_template("help_form.html", query=query_row, history=history, languages=languages, selected_lang=selected_lang, assignments=assignments)
 
 
 @bp.route("/view/<int:query_id>")
 @login_required
 def help_view(query_id: int) -> str:
+    db = get_db()
     query_row, responses = get_query(query_id)
     history = get_history()
+    # if query row is not valid or if query is not one that the user is allowed to acccess
+    # query row might be none
+    #
+    # assignment name and content can be set to empty strings
+    if query_row and query_row['assignment_id']:
+        assignment_name, assignment_content = db.execute("SELECT name, content FROM assignments WHERE assignments.id=?", [query_row['assignment_id']]).fetchone()
+    else:
+        assignment_name, assignment_content = " ", " "
+
     if query_row and query_row['topics_json']:
         topics = json.loads(query_row['topics_json'])
     else:
         topics = []
 
-    return render_template("help_view.html", query=query_row, responses=responses, history=history, topics=topics)
+    return render_template("help_view.html", query=query_row, assignment_name=assignment_name, assignment_content=assignment_content, responses=responses, history=history, topics=topics)
 
 
 def score_response(response_txt: str, avoid_set: Iterable[str]) -> int:
@@ -77,7 +89,7 @@ def score_response(response_txt: str, avoid_set: Iterable[str]) -> int:
     return score
 
 
-async def run_query_prompts(llm_dict: LLMDict, language: str, code: str, error: str, issue: str) -> tuple[list[dict[str, str]], dict[str, str]]:
+async def run_query_prompts(llm_dict: LLMDict, language: str, assignment_id: int, code: str, error: str, issue: str) -> tuple[list[dict[str, str]], dict[str, str]]:
     ''' Run the given query against the coding help system of prompts.
 
     Returns a tuple containing:
@@ -87,6 +99,13 @@ async def run_query_prompts(llm_dict: LLMDict, language: str, code: str, error: 
     api_key = llm_dict['key']
     model = llm_dict['model']
 
+    db = get_db()
+    assignment_content = db.execute("SELECT content from assignments WHERE assignments.id=?", [assignment_id]).fetchone()
+    if assignment_content is not None and len(assignment_content) > 0:
+        content_value = assignment_content[0]
+    else:
+        content_value = None
+
     # create "avoid set" from class configuration
     class_config = get_class_config()
     avoid_set = {x.strip() for x in class_config.avoid.split('\n') if x.strip() != ''}
@@ -95,7 +114,7 @@ async def run_query_prompts(llm_dict: LLMDict, language: str, code: str, error: 
     task_main = asyncio.create_task(
         get_completion(
             api_key,
-            prompt=prompts.make_main_prompt(language, code, error, issue, avoid_set),
+            prompt=prompts.make_main_prompt(language, content_value, code, error, issue, avoid_set),
             model=model,
             n=1,
             score_func=lambda x: score_response(x, avoid_set)
@@ -104,7 +123,7 @@ async def run_query_prompts(llm_dict: LLMDict, language: str, code: str, error: 
     task_sufficient = asyncio.create_task(
         get_completion(
             api_key,
-            prompt=prompts.make_sufficient_prompt(language, code, error, issue),
+            prompt=prompts.make_sufficient_prompt(language, content_value, code, error, issue),
             model=model
         )
     )
@@ -136,24 +155,24 @@ async def run_query_prompts(llm_dict: LLMDict, language: str, code: str, error: 
         return responses, {'insufficient': response_sufficient_txt, 'main': response_txt}
 
 
-def run_query(llm_dict: LLMDict, language: str, code: str, error: str, issue: str) -> int:
-    query_id = record_query(language, code, error, issue)
+def run_query(llm_dict: LLMDict, language: str, assignment_id: int, code: str, error: str, issue: str) -> int:
+    query_id = record_query(language, assignment_id, code, error, issue)
 
-    responses, texts = asyncio.run(run_query_prompts(llm_dict, language, code, error, issue))
+    responses, texts = asyncio.run(run_query_prompts(llm_dict, language, assignment_id, code, error, issue))
 
     record_response(query_id, responses, texts)
 
     return query_id
 
 
-def record_query(language: str, code: str, error: str, issue: str) -> int:
+def record_query(language: str, assignment_id: int, code: str, error: str, issue: str) -> int:
     db = get_db()
     auth = get_auth()
     role_id = auth['role_id']
 
     cur = db.execute(
-        "INSERT INTO queries (language, code, error, issue, user_id, role_id) VALUES (?, ?, ?, ?, ?, ?)",
-        [language, code, error, issue, auth['user_id'], role_id]
+        "INSERT INTO queries (language, assignment_id, code, error, issue, user_id, role_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [language, assignment_id, code, error, issue, auth['user_id'], role_id]
     )
     new_row_id = cur.lastrowid
     db.commit()
@@ -184,13 +203,18 @@ def help_request(llm_dict: LLMDict) -> Response:
         language = class_config.languages[lang_id]
     else:
         language = ""
+
+    if "assignment_id" in request.form:
+        assignment_id = request.form["assignment_id"]
+    else:
+        assignment_id = None
     code = request.form["code"]
     error = request.form["error"]
     issue = request.form["issue"]
 
     # TODO: limit length of code/error/issue
 
-    query_id = run_query(llm_dict, language, code, error, issue)
+    query_id = run_query(llm_dict, language, assignment_id, code, error, issue)
 
     return redirect(url_for(".help_view", query_id=query_id))
 
@@ -207,11 +231,12 @@ def load_test(llm_dict: LLMDict) -> Response:
     llm_dict['key'] = TEST_API_KEY
 
     language = "Python"
+    assignment_id = "Assignment"
     code = "Code"
     error = "Error"
     issue = "Issue"
 
-    query_id = run_query(llm_dict, language, code, error, issue)
+    query_id = run_query(llm_dict, language, assignment_id, code, error, issue)
 
     return redirect(url_for(".help_view", query_id=query_id))
 
@@ -252,12 +277,16 @@ def get_topics_raw(llm_dict: LLMDict, query_id: int) -> list[str]:
 
 def get_topics(llm_dict: LLMDict, query_id: int) -> list[str]:
     query_row, responses = get_query(query_id)
+    db = get_db()
+    assignment_content = db.execute("SELECT content from assignments WHERE assignments.id=?", [query_row['assignment_id']]).fetchone()
+    content_value = assignment_content[0]
 
     if not query_row or not responses:
         return []
 
     messages = prompts.make_topics_prompt(
         query_row['language'],
+        content_value,
         query_row['code'],
         query_row['error'],
         query_row['issue'],

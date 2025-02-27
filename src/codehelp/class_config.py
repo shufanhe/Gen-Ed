@@ -4,9 +4,11 @@
 
 from dataclasses import dataclass, field
 
-from flask import current_app
+from flask import current_app, render_template
+from gened.auth import get_auth
 from gened.class_config import get_class_config as gened_get_config
 from gened.class_config import register_class_config, register_extra_handler
+from gened.db import get_db
 from typing_extensions import Self
 from werkzeug.datastructures import ImmutableMultiDict
 
@@ -34,5 +36,13 @@ def get_class_config() -> ClassConfig:
     return gened_get_config(ClassConfig)
 
 
+def assignment_config_form() -> str:
+    db = get_db()
+    auth = get_auth()
+    assignments = db.execute("SELECT * from assignments WHERE assignments.class_id=? AND is_deleted = FALSE ORDER BY id", [auth['class_id']]).fetchall()
+    return render_template("config_form_assignments.html", assignments=assignments)
+
+
 def register_with_gened() -> None:
     register_class_config(ClassConfig)
+    register_extra_handler(assignment_config_form)
